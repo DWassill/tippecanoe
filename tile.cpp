@@ -68,6 +68,14 @@ pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t var_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t task_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// DEREK: Used to track which features were added in previous zooms
+std::map<unsigned long long, serial_feature> all_zooms_added_features;
+
+// DEREK: we need to know what every feature in the zoom level is, not just the ones in this tile
+int curr_zoom = -1;
+std::map<unsigned long long, serial_feature> this_zoom_features;
+
+
 // convert serial feature geometry (drawvec) to output tile geometry (mvt_geometry)
 static std::vector<mvt_geometry> to_feature(drawvec const &geom) {
 	std::vector<mvt_geometry> out;
@@ -444,7 +452,9 @@ static std::vector<std::shared_ptr<serial_feature>> disassemble_multiplier_clust
 
 // Write out copies of a feature into the temporary files for the next zoom level
 static void rewrite(serial_feature const &osf, int z, int nextzoom, int maxzoom, unsigned tx, unsigned ty, int buffer, std::atomic<bool> within[], std::atomic<long long> *geompos, long long start_geompos[], compressor *geomfile[], const char *fname, int child_shards, int max_zoom_increment, int segment, unsigned *initial_x, unsigned *initial_y) {
+	// printf("got here              \n");
 	if (osf.geometry.size() > 0 && (nextzoom <= maxzoom || additional[A_EXTEND_ZOOMS] || extend_zooms_max > 0)) {
+		// printf("got here           \n");
 		int xo, yo;
 		int span = 1 << (nextzoom - z);
 
@@ -466,12 +476,23 @@ static void rewrite(serial_feature const &osf, int z, int nextzoom, int maxzoom,
 		for (k = 0; k < 4; k++) {
 			if (bbox2[k] < 0) {
 				bbox2[k] = 0;
+				//printf("low             \n");
 			}
 			if (bbox2[k] >= 256 * span) {
 				bbox2[k] = 256 * (span - 1);
+				//printf("high              \n");
 			}
 
+			//printf("%lld                     \n", bbox2[k]);
 			bbox2[k] /= 256;
+			//printf("%lld                     \n", bbox2[k]);
+		}
+
+		if (additional[A_AGGREGATE_CLUSTER]) {
+			bbox2[0] = 0;
+			bbox2[1] = 0;
+			bbox2[2] = 1;
+			bbox2[3] = 1;
 		}
 
 		// Offset from tile coordinates back to world coordinates
@@ -1086,9 +1107,12 @@ static serial_feature next_feature(decompressor *geoms, std::atomic<long long> *
 			fprintf(stderr, "Short read (%zu for %zu) from geometry\n", n, s.size());
 			exit(EXIT_READ);
 		}
+	
 
 		sf = deserialize_feature(s, z, tx, ty, initial_x, initial_y);
 		sf.stringpool = global_stringpool + pool_off[sf.segment];
+
+		// printf("Feature read: %llu, zoom: %d, tx: %u, ty: %u\n", sf.id, z, tx, ty);
 
 		// with fractional zoom level, so we can target a specific number
 		// of features to keep with retain-points-multiplier, not just the
@@ -1138,7 +1162,8 @@ static serial_feature next_feature(decompressor *geoms, std::atomic<long long> *
 		}
 		next_feature_state.previndex = sf.index;
 
-		if (clip_to_tile(sf, z, buffer)) {
+		// DEREK: I think I want this off if we are aggregating
+		if (!additional[A_AGGREGATE_CLUSTER] && clip_to_tile(sf, z, buffer)) {
 			continue;
 		}
 
@@ -1229,10 +1254,13 @@ static serial_feature next_feature(decompressor *geoms, std::atomic<long long> *
 
 			std::string &layername = (*layer_unmaps)[sf.segment][sf.layer];
 			auto count = multiplier_state->count.find(layername);
+
 			if (count == multiplier_state->count.end()) {
 				multiplier_state->count.emplace(layername, 0);
 				count = multiplier_state->count.find(layername);
-				sf.dropped = FEATURE_KEPT;  // the first feature in each tile is always kept
+				if (!has_priorities) { // DEREK: Only need to keep this if we do not have any with priorities (did not work)
+					sf.dropped = FEATURE_KEPT;  // the first feature in each tile is always kept
+				}
 			}
 
 			if (z >= feature_minzoom || sf.dropped == FEATURE_KEPT) {
@@ -1272,7 +1300,12 @@ static serial_feature next_feature(decompressor *geoms, std::atomic<long long> *
 				sf.full_values.erase(sf.full_values.begin() + i);
 			}
 		}
-
+		if (sf.priority != 0) {
+			sf.dropped = FEATURE_KEPT;
+		}
+		
+		sf.dropped = FEATURE_KEPT;
+		
 		return sf;
 	}
 }
@@ -1541,7 +1574,6 @@ bool find_feature_to_accumulate_onto(std::vector<std::shared_ptr<serial_feature>
 			}
 		}
 	}
-
 	return false;
 }
 
@@ -1619,6 +1651,152 @@ void skip_tile(decompressor *geoms, std::atomic<long long> *geompos_in, bool com
 }
 
 long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, char *global_stringpool, int z, const unsigned tx, const unsigned ty, const int detail, int min_detail, sqlite3 *outdb, const char *outdir, int buffer, const char *fname, compressor **geomfile, std::atomic<long long> *geompos, int minzoom, int maxzoom, double todo, std::atomic<long long> *along, long long alongminus, double gamma, int child_shards, long long *pool_off, unsigned *initial_x, unsigned *initial_y, std::atomic<int> *running, double simplification, std::vector<std::map<std::string, layermap_entry>> *layermaps, std::vector<std::vector<std::string>> *layer_unmaps, size_t tiling_seg, size_t pass, unsigned long long mingap, long long minextent, unsigned long long mindrop_sequence, const char *prefilter, const char *postfilter, json_object *filter, write_tile_args *arg, atomic_strategy *strategy_out, bool compressed_input, node *shared_nodes_map, size_t nodepos, std::string const &shared_nodes_bloom, std::vector<std::string> const &unidecode_data, long long estimated_complexity, std::set<zxy> &skip_children_out) {
+	// DEREK: Testing
+	printf("%d / %u / %u ---------------------------------\n", z, tx, ty);
+
+	if (z > curr_zoom && additional[A_AGGREGATE_CLUSTER]) {
+		this_zoom_features.clear();
+		this_zoom_features = global_features;
+		for (int prio = max_priority; prio >= -1; prio--) {
+			for (auto sf : this_zoom_features) {
+				if (sf.second.priority != prio) {
+					continue;
+				}
+				printf("%llu                 \n", sf.second.id);
+				if (sf.second.t == VT_LINE) {
+					if (prio != -1) {
+						printf("ERROR: GOT TO LINE WITHOUT PRIORITY -1. PRIORITY: %d\n", sf.second.priority);
+						exit(1);
+					}
+					this_zoom_features[sf.first].dropped = FEATURE_KEPT;
+					continue;
+				}
+
+				if (sf.second.aggregated) {
+					printf("feature already aggregated       \n");
+					continue;
+				}
+				else {
+					this_zoom_features[sf.first].dropped = FEATURE_KEPT;
+					printf("keeping              \n");
+				}
+
+				for (auto other_feature : this_zoom_features) {
+					if (other_feature.second.id == sf.second.id) {
+						continue;
+					}
+					if (other_feature.second.aggregated) {
+						// printf("feature %llu was already aggregated      \n", other_feature.id);
+						continue;
+					}
+					double x_diff = std::abs(sf.second.x_coord - other_feature.second.x_coord);
+					double y_diff = std::abs(sf.second.y_coord - other_feature.second.y_coord);
+
+					double distance = sqrt((pow(x_diff, 2) + pow(y_diff, 2)));
+
+					double pixel_distance = (distance * (360.0/256.0)) * pow(2, z);
+					if (pixel_distance < cluster_distance) {
+						if (all_zooms_added_features.count(other_feature.first) && !all_zooms_added_features.count(sf.first)) {
+							all_zooms_added_features.erase(sf.first);
+							continue;
+						}
+						
+						this_zoom_features[other_feature.second.id].aggregated = true;
+						this_zoom_features[other_feature.second.id].dropped = FEATURE_DROPPED;
+
+						for (auto& line : this_zoom_features) {
+							if (line.second.t == VT_LINE) {
+								if (line.second.source == other_feature.first) {
+									line.second.source = sf.second.id;
+
+								}
+								if (line.second.target == other_feature.first) {
+									line.second.target = sf.second.id;
+								}
+							}
+						}
+					}
+				}
+				all_zooms_added_features[sf.first] = sf.second;
+			}
+		}
+		curr_zoom = z;
+	}
+	// DEREK: The first time a tile is made for any zoom level, we will calculate what to drop
+	// for all the features in all tiles, so we do not get issues with incorrectly assuming a
+	// feature in another tile has been dropped
+	if (z > curr_zoom ) {
+		this_zoom_features.clear();
+		this_zoom_features = global_features;
+		for (int prio = max_priority; prio >= -1; prio--) {
+			for (auto& sf : this_zoom_features) {
+
+				if (sf.second.priority != prio) {
+					continue;
+				}
+				printf("%llu                 \n", sf.second.id);
+				if (sf.second.t == VT_LINE) {
+					if (prio != -1) {
+						printf("ERROR: GOT TO LINE WITHOUT PRIORITY -1. PRIORITY: %d\n", sf.second.priority);
+						exit(1);
+					}
+					unsigned long long s = sf.second.source;
+					unsigned long long t = sf.second.target;
+
+					if ((all_zooms_added_features.count(s) == 0 || all_zooms_added_features.count(t) == 0) 
+						&& !additional[A_LEAVE_LINES]) {
+						printf("dropping the line      \n");
+						this_zoom_features[sf.second.id].dropped = FEATURE_DROPPED;
+						continue;
+					}
+					else {
+						printf("keeping the line          \n");
+						this_zoom_features[sf.second.id].dropped = FEATURE_KEPT;
+						all_zooms_added_features[sf.second.id] = sf.second;
+						continue;
+					}
+				}
+				
+				bool drop_feature = false;
+				for  (auto old_feature : all_zooms_added_features) {
+					if (old_feature.second.id == sf.second.id) {
+						continue;
+					}
+					if (old_feature.second.t != VT_POINT) {
+						continue;
+					}
+					double x_diff = std::abs(sf.second.x_coord - old_feature.second.x_coord);
+
+					double y_diff = std::abs(sf.second.y_coord - old_feature.second.y_coord);
+
+					double distance = sqrt((pow(x_diff, 2) + pow(y_diff, 2)));
+
+					double pixel_distance = (distance * (360.0/256.0)) * pow(2, z);
+
+					// if (((old_feature.second.index < sf.index) && (sf.index - old_feature.second.index) < cluster_mingap) ||
+					// 	((old_feature.second.index > sf.index) && (old_feature.second.index - sf.index) < cluster_mingap))
+					if (pixel_distance < cluster_distance) {
+						drop_feature = true;
+						printf("too close to: %d  diff: %f    \n", old_feature.second.id, pixel_distance);
+						sf.second.dropped = FEATURE_DROPPED;
+						break;
+					}
+				}
+				if (drop_feature) {
+					continue;
+				}
+				else {
+					sf.second.dropped = FEATURE_KEPT;
+					all_zooms_added_features[sf.first] = sf.second;
+					this_zoom_features[sf.first] = sf.second;
+					printf("keeping the feature          \n");
+				}
+			}
+		}
+		curr_zoom = z;
+	}
+
+	// printf("cluster distance: %d       \n", cluster_distance);
 	double merge_fraction = 1;
 	double mingap_fraction = 1;
 	double minextent_fraction = 1;
@@ -1638,6 +1816,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 		exit(EXIT_IMPOSSIBLE);
 	}
 
+	// DEREK: z seems to be used to find zoom level?
 	int nextzoom = z + 1;
 	if (nextzoom < minzoom) {
 		if (z + max_zoom_increment > minzoom) {
@@ -1823,20 +2002,54 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 
 		strategy strategy;
 		strategy.detail_reduced = detail_reduced;
+		bool done_first_pass = false;
+		std::vector<serial_feature> all_features;
+		std::map<unsigned long long, serial_feature> added_features;
+		//std::map<unsigned long long, serial_feature> aggregated_features;
 
+		for (int i = max_priority + 1; i >= -1; i--) {
 		for (size_t seq = 0;; seq++) {
 			serial_feature sf;
 			ssize_t which_serial_feature = -1;
 
-			if (prefilter == NULL) {
-				sf = next_feature(geoms, geompos_in, z, tx, ty, initial_x, initial_y, &original_features, &unclipped_features, nextzoom, maxzoom, minzoom, max_zoom_increment, pass, along, alongminus, buffer, within, geomfile, geompos, start_geompos, &oprogress, todo, fname, child_shards, filter, global_stringpool, pool_off, layer_unmaps, first_time, compressed_input, &multiplier_state, tile_stringpool, unidecode_data, next_feature_state, arg->droprate);
-			} else {
-				sf = parse_feature(prefilter_jp, z, tx, ty, layermaps, tiling_seg, layer_unmaps, postfilter != NULL, key_pool);
+
+			if (i == max_priority + 1) {
+				if (prefilter == NULL) {
+					sf = next_feature(geoms, geompos_in, z, tx, ty, initial_x, initial_y, &original_features, &unclipped_features, nextzoom, maxzoom, minzoom, max_zoom_increment, pass, along, alongminus, buffer, within, geomfile, geompos, start_geompos, &oprogress, todo, fname, child_shards, filter, global_stringpool, pool_off, layer_unmaps, first_time, compressed_input, &multiplier_state, tile_stringpool, unidecode_data, next_feature_state, arg->droprate);
+					sf.aggregated = false;
+					// printf("%llu                      \n", sf.id);
+				} else {
+					sf = parse_feature(prefilter_jp, z, tx, ty, layermaps, tiling_seg, layer_unmaps, postfilter != NULL, key_pool);
+				}
+
+				if (sf.t < 0) {
+					// printf("----                      \n");
+					break;
+				}
+				else {
+					all_features.push_back(sf);
+					this_zoom_features[sf.id].geometry = sf.geometry;
+					continue;
+				}
+			}
+			else {
+				if (seq >= all_features.size()) {
+					break;
+				}
+				sf = all_features[seq];
+				if (sf.priority != i) {
+					continue;
+				}
+				if (this_zoom_features[sf.id].dropped == FEATURE_DROPPED) {
+					// printf("feature was dropped: %llu\n", sf.id);   
+					continue;
+				}
+				if (clip_to_tile(sf, z, buffer)){
+					// printf("node %llu was not in the tile        \n", sf.id);
+					continue;
+				}
 			}
 
-			if (sf.t < 0) {
-				break;
-			}
 
 			std::string &layername = (*layer_unmaps)[sf.segment][sf.layer];
 			if (layers.count(layername) == 0) {
@@ -1889,8 +2102,8 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 			}
 
 			unsigned long long drop_sequence = 0;
-			if (additional[A_COALESCE_FRACTION_AS_NEEDED] || additional[A_DROP_FRACTION_AS_NEEDED] || prevent[P_DYNAMIC_DROP]) {
-				drop_sequence = calculate_drop_sequence(sf);
+			if (additional[A_COALESCE_FRACTION_AS_NEEDED] || additional[A_DROP_FRACTION_AS_NEEDED] || prevent[P_DYNAMIC_DROP]) { // DEREK: simply do not calculate drop sequence if this is high priority
+				drop_sequence = calculate_drop_sequence(sf); // DEREK: will need to edit calculate_drop_sequence I think to keep high priority features
 			}
 
 			if (sf.feature_minzoom > z + 1) {
@@ -1906,21 +2119,23 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 			} else {
 				can_stop_early = false;
 
-				if (sf.dropped != FEATURE_DROPPED && sf.dropped != FEATURE_ADDED_FOR_MULTIPLIER_DENSITY) {
+				if (sf.dropped != FEATURE_DROPPED && sf.dropped != FEATURE_ADDED_FOR_MULTIPLIER_DENSITY) { // DEREK: prevent it from dropping this feature if priority is not 0. Never true for dblp
 					// Does the current multiplier cluster already have too many features?
 					// (Because we are dropping dynamically, and we have already filled the
 					// cluster with features that were dynamically dropped from being
 					// primary features)
 					// If so, we have to drop this one, even if it would potentially qualify
 					// as a secondary feature to be exposed by filtering
-					if (layer.multiplier_cluster_size >= (size_t) retain_points_multiplier) {
+
+					// DEREK: Can't let it drop high priority features 
+					if (layer.multiplier_cluster_size >= (size_t) retain_points_multiplier) { // DEREK: Never true with dblp app
 						sf.dropped = FEATURE_DROPPED;
 					}
 				}
 			}
 
-			if (sf.dropped == FEATURE_DROPPED || drop_rest) {
-				if (find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) {
+			if ((sf.dropped == FEATURE_DROPPED || drop_rest) && sf.priority == 0 ) { // DEREK: True at least sometimes. Do not let it drop if priority is not zero
+				if (find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) { // True at least some of the time
 					preserve_attributes(arg->attribute_accum, sf, *features[which_serial_feature], key_pool);
 					strategy.dropped_by_rate++;
 					can_stop_early = false;
@@ -1928,11 +2143,13 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				}
 			}
 
+
+
 			// only the first point of a multiplier cluster can be dropped
 			// by any of these mechanisms. (but if one is, it drags the whole
 			// cluster down with it by setting drop_rest).
-			if (sf.dropped == FEATURE_KEPT) {
-				if (gamma > 0) {
+			if (sf.dropped == FEATURE_KEPT) {  // DEREK: do not consider dropping if priority is not 0
+				if (gamma > 0) { // DEREK 
 					if (manage_gap(sf.index, &previndex, scale, gamma, &gap) && find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) {
 						preserve_attributes(arg->attribute_accum, sf, *features[which_serial_feature], key_pool);
 						strategy.dropped_by_gamma++;
@@ -1948,28 +2165,70 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 					// distances between points that are subject to dot-dropping,
 					// rather than wanting each feature to have a consistent
 					// idea of density between zooms.
-					if ((sf.index < merge_previndex || sf.index - merge_previndex < cluster_mingap) && find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) {
-						features[which_serial_feature]->clustered++;
 
-						if (!additional[A_KEEP_POINT_CLUSTER_POSITION] &&
-						    features[which_serial_feature]->t == VT_POINT &&
-						    features[which_serial_feature]->geometry.size() == 1 &&
-						    sf.geometry.size() == 1) {
-							double x = (double) features[which_serial_feature]->geometry[0].x * features[which_serial_feature]->clustered;
-							double y = (double) features[which_serial_feature]->geometry[0].y * features[which_serial_feature]->clustered;
-							x += sf.geometry[0].x;
-							y += sf.geometry[0].y;
-							features[which_serial_feature]->geometry[0].x = x / (features[which_serial_feature]->clustered + 1);
-							features[which_serial_feature]->geometry[0].y = y / (features[which_serial_feature]->clustered + 1);
+					if (additional[A_AGGREGATE_CLUSTER]) {
+						if (sf.priority == i && sf.t == VT_POINT) {
+							if (sf.aggregated && sf.dropped == FEATURE_DROPPED) {
+								continue;
+							}
 						}
+						else if (sf.t == VT_LINE) {
+							unsigned long long src = this_zoom_features[sf.id].source;
+							unsigned long long trgt = this_zoom_features[sf.id].target;
+							printf("got to line_string stuff\n");
+							printf("source: %llu                \n", src);
+							printf("target: %llu                \n", trgt);
+							if (src == trgt) {
+								continue;
+							}
+							// line.second.geometry[0].x = sf.second.geometry[0].x;
+							// 		line.second.geometry[0].y = sf.second.geometry[0].y;
 
-						preserve_attributes(arg->attribute_accum, sf, *features[which_serial_feature], key_pool);
-						strategy.coalesced_as_needed++;
-						drop_rest = true;
-						can_stop_early = false;
+							sf.geometry[0].x = this_zoom_features[src].geometry[0].x;
+							sf.geometry[0].y = this_zoom_features[src].geometry[0].y;
+							
+							sf.geometry[1].x = this_zoom_features[trgt].geometry[0].x;
+							sf.geometry[1].y = this_zoom_features[trgt].geometry[0].y;
+						}
+						else {
+							continue;
+						}
+					}
+
+				
+					// DEREK: Again, make sure not to drop high priority
+					//if ((sf.index < merge_previndex || sf.index - merge_previndex < cluster_mingap) && find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) { // DEREK: I am confused by what this is doing 
+					if (!additional[A_AGGREGATE_CLUSTER]) {
+					if (sf.priority == i ) { // DEREK: try to add features for the current priority level
+						if (this_zoom_features.count(sf.id) == 0) {
+							continue;
+						}
+						// if (this_zoom_features[sf.id].dropped != FEATURE_KEPT) {
+						// 	continue;
+						// }
+						if (all_zooms_added_features.count(sf.id) == 0) {
+							continue;
+						}
+					}
+					// else if (i < 0 && sf.t == VT_LINE) {
+					// 	printf("got to line_string stuff\n");
+					// 	printf("source: %llu                \n", sf.source);
+					// 	printf("target: %llu                \n", sf.target);
+
+					// 	// DEREK: If we have added all nodes and do not find one of the line end points in the list of added nodes, drop the line
+					// 	if (all_zooms_added_features.count(sf.source) > 0 && all_zooms_added_features.count(sf.target) > 0) {
+					// 		printf("keeping the line\n");
+					// 	}
+					// 	else {
+					// 		printf("dropping the line        \n");
+					// 		continue;
+					// 	}
+					// }
+					else {
 						continue;
 					}
-				} else if (additional[A_DROP_DENSEST_AS_NEEDED]) {
+					}
+				} else if (additional[A_DROP_DENSEST_AS_NEEDED]) {  // DEREK
 					add_sample_to(gaps, sf.gap, gaps_increment, seq);
 					if (sf.gap < mingap) {
 						can_stop_early = false;
@@ -1977,7 +2236,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 							continue;
 						}
 					}
-				} else if (z <= cluster_maxzoom && (additional[A_CLUSTER_DENSEST_AS_NEEDED])) {
+				} else if (z <= cluster_maxzoom && (additional[A_CLUSTER_DENSEST_AS_NEEDED])) { // DEREK
 					// this is now just like coalesce-densest, except that instead of unioning the geometry,
 					// it averages the point locations
 					add_sample_to(gaps, sf.gap, gaps_increment, seq);
@@ -2000,7 +2259,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 						drop_rest = true;
 						continue;
 					}
-				} else if (additional[A_COALESCE_DENSEST_AS_NEEDED]) {
+				} else if (additional[A_COALESCE_DENSEST_AS_NEEDED]) { // DEREK
 					add_sample_to(gaps, sf.gap, gaps_increment, seq);
 					if (sf.gap < mingap && find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) {
 						if (sf.t == VT_POINT || !line_is_too_small(sf.geometry, z, line_detail)) {
@@ -2014,7 +2273,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 						can_stop_early = false;
 						continue;
 					}
-				} else if (additional[A_DROP_SMALLEST_AS_NEEDED]) {
+				} else if (additional[A_DROP_SMALLEST_AS_NEEDED]) { // DEREK
 					add_sample_to(extents, sf.extent, extents_increment, seq);
 					// search here is for LLONG_MAX, not minextent, because we are dropping features, not coalescing them,
 					// so we shouldn't expect to find anything small that we can related this feature to.
@@ -2095,13 +2354,18 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				still_need_simplification_after_reduction = true;  // not a polygon, so simplify
 			}
 
-			if (sf.t == VT_POLYGON || sf.t == VT_LINE) {
-				if (line_is_too_small(sf.geometry, z, line_detail)) {
-					continue;
-				}
-			}
+			// if (sf.t == VT_POLYGON || sf.t == VT_LINE) {
+			// 	if (line_is_too_small(sf.geometry, z, line_detail)) {
+			// 		continue;
+			// 	}
+			// }
+			
 
 			unsigned long long sfindex = sf.index;
+			// DEREK: testing why we are not keeping the line
+			// if (sf.t == VT_LINE) {
+			// 	printf("dropped: %d, geom2: %lld, %lld\n", sf.dropped, sf.geometry[1].x, sf.geometry[1].y);
+			// }
 
 			if (sf.geometry.size() > 0) {
 				// There are two adjustments that we need to make
@@ -2143,12 +2407,14 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				} else {
 					kept++;
 
-					if (features.size() == 0) {
+					if (features.size() == 0 && !has_priorities) {
 						// the first feature of the the tile is always kept.
 						// it may not have been marked kept in next_feature
 						// if the previous feature was nominally the first
 						// but has already been lost because its geometry was
 						// clipped away
+						// DEREK
+						// printf("nooooooo    \n");
 						sf.dropped = FEATURE_KEPT;
 					}
 
@@ -2223,7 +2489,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 			merge_previndex = sfindex;
 			coalesced_area = 0;
 		}
-
+		}
 		// We are done reading the features.
 		// Close the prefilter if it was opened.
 		// Close the output files for the next zoom level.
@@ -2555,6 +2821,8 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 
 				feature.id = layer_features[x]->id;
 				feature.has_id = layer_features[x]->has_id;
+				// DEREK: add the priority
+				feature.priority = layer_features[x]->priority;
 
 				decode_meta(*layer_features[x], layer, feature);
 				for (size_t a = 0; a < layer_features[x]->full_keys.size(); a++) {
@@ -2592,6 +2860,14 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 			}
 
 			if (layer.features.size() > 0) {
+				// DEREK: check that the features with priority > 0 are in a tile at each zoom level
+				if (z == 0) {
+				for (int i = 0; i < layer.features.size(); i++) {
+					if (layer.features[i].type == VT_POINT) {
+						//printf("%llu / %d/%lu/%lu              \n", layer.features[i].id, z, tx, ty);
+					}
+				}
+				}
 				tile.layers.push_back(std::move(layer));
 			}
 		}
@@ -2890,7 +3166,8 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				}
 
 				if (outdb != NULL) {
-					mbtiles_write_tile(outdb, z, tx, ty, compressed.data(), compressed.size());
+					mbtiles_write_tile(outdb, z, tx, ty, compressed.data(), compressed.size()); // DEREK: This is where it's actually writing the output? Try getting the data and printing it before it is compressed
+																								// to a human readable file so we can see if it is working
 				} else if (outdir != NULL) {
 					dir_write_tile(outdir, z, tx, ty, compressed);
 				}

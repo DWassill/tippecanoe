@@ -205,6 +205,20 @@ std::string serialize_feature(serial_feature *sf, long long wx, long long wy) {
 		serialize_ulong_long(s, sf->id);
 	}
 
+	// DEREK: I think this is the correct spot to do this
+	serialize_uint(s, sf->priority);
+	// DEREK: serializing the source and target, not sure why it isn't working
+	//printf("source: %llu          \n", sf->source);
+	serialize_ulong_long(s, sf->source);
+	serialize_ulong_long(s, sf->target);
+
+	long long x;
+	std::memcpy(&x, &sf->x_coord, sizeof(double));
+	serialize_long_long(s, x);
+	long long y;
+	std::memcpy(&y, &sf->y_coord, sizeof(double));
+	serialize_long_long(s, y);
+
 	serialize_int(s, sf->segment);
 
 	write_geometry(sf->geometry, s, wx, wy);
@@ -256,6 +270,19 @@ serial_feature deserialize_feature(std::string const &geoms, unsigned z, unsigne
 		sf.has_id = true;
 		deserialize_ulong_long(&cp, &sf.id);
 	}
+
+	deserialize_uint(&cp, &sf.priority);
+	// DEREK: deserialize the source and target
+	deserialize_ulong_long(&cp, &sf.source);
+	deserialize_ulong_long(&cp, &sf.target);
+
+	long long x;
+	deserialize_long_long(&cp, &x);
+	std::memcpy(&sf.x_coord, &x, sizeof(double));
+
+	long long y;
+	deserialize_long_long(&cp, &y);
+	std::memcpy(&sf.y_coord, &y, sizeof(double));
 
 	deserialize_int(&cp, &sf.segment);
 
@@ -909,6 +936,9 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf, std::
 	}
 	(*(sst->progress_seq))++;
 	(*(sst->layer_seq))++;
+
+	// DEREK: Testing
+	// printf("%d", sf.priority);
 
 	return 1;
 }

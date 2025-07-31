@@ -40,8 +40,9 @@
 #include "milo/dtoa_milo.h"
 #include "errors.hpp"
 
-int serialize_geojson_feature(struct serialization_state *sst, json_object *geometry, json_object *properties, json_object *id, int layer, json_object *tippecanoe, json_object *feature, std::string const &layername) {
+int serialize_geojson_feature(struct serialization_state *sst, json_object *geometry, json_object *properties, json_object *id, int layer, json_object *tippecanoe, json_object *feature, std::string const &layername, json_object *priority) {
 	json_object *geometry_type = json_hash_get(geometry, "type");
+	static unsigned int count = 1;
 	if (geometry_type == NULL) {
 		static int warned = 0;
 		if (!warned) {
@@ -177,6 +178,23 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 		}
 	}
 
+	// DEREK: Getting the actual number value out of priority
+	// int priority_value = 0;
+	// if (priority != NULL) {
+	// 	if (priority->type == JSON_NUMBER) {
+	// 		if (priority->value.number.number >= 0) {
+	// 			priority_value = priority->value.number.number;
+				// has_priorities = true;
+				// if (priority_value > max_priority) {
+				// 	max_priority = priority_value;
+				// }
+				// char *err = NULL;
+				// std::string priority_number = milo::dtoa_milo(priority->value.number.number);
+				// priority_value = strtoull(priority_number.c_str(), &err, 10);
+	// 		}
+	// 	}
+	// }
+
 	size_t nprop = 0;
 	if (properties != NULL && properties->type == JSON_HASH) {
 		nprop = properties->value.object.length;
@@ -189,9 +207,30 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 	values.reserve(nprop);
 	key_pool key_pool;
 
+	unsigned long long source = 0;
+	unsigned long long target = 0;
+	int priority_value = 0;
+
 	for (size_t i = 0; i < nprop; i++) {
 		if (properties->value.object.keys[i]->type == JSON_STRING) {
+			// if (strcmp(properties->value.object.keys[i]->value.string.string, "id") == 0) {
+			// }
 			serial_val sv = stringify_value(properties->value.object.values[i], sst->fname, sst->line, feature);
+
+			if (strcmp(properties->value.object.keys[i]->value.string.string, "source") == 0){
+				source = properties->value.object.values[i]->value.number.number;
+			}
+			if (strcmp(properties->value.object.keys[i]->value.string.string, "target") == 0){
+				target = properties->value.object.values[i]->value.number.number;
+			}
+			if (strcmp(properties->value.object.keys[i]->value.string.string, "priority") == 0){
+				priority_value = properties->value.object.values[i]->value.number.number;
+				has_priorities = true;
+				if (priority_value > max_priority) {
+					max_priority = priority_value;
+				}
+			}
+
 
 			full_keys.emplace_back(key_pool.pool(properties->value.object.keys[i]->value.string.string));
 			values.push_back(std::move(sv));
@@ -201,12 +240,27 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 	drawvec dv;
 	parse_coordinates(t, coordinates, dv, VT_MOVETO, sst->fname, sst->line, feature);
 
+	// DEREK: save the coords
+	double x_coord = coordinates->value.array.array[0]->value.number.number;
+	double y_coord = coordinates->value.array.array[1]->value.number.number;
+	// printf("%f, %f         \n", x_coord, y_coord);
+
 	serial_feature sf;
 	sf.layer = layer;
 	sf.segment = sst->segment;
 	sf.t = mb_geometry[t];
-	sf.has_id = has_id;
-	sf.id = id_value;
+	// DEREK: To get actual usable ids without modifying dblp
+	if (id == NULL) {
+		sf.has_id = true;
+		sf.id = count++;
+		printf("gave new id: %llu       \n", sf.id);
+	}
+	else {
+		sf.has_id = has_id;
+		sf.id = id_value;
+	}
+	sf.priority = priority_value; // DEREK: Set priority in the serial_feature
+	//printf("%d", sf.priority);
 	sf.tippecanoe_minzoom = tippecanoe_minzoom;
 	sf.tippecanoe_maxzoom = tippecanoe_maxzoom;
 	sf.geometry = dv;
@@ -214,8 +268,22 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 	sf.seq = *(sst->layer_seq);
 	sf.full_keys = std::move(full_keys);
 	sf.full_values = std::move(values);
+	//DEREK: set the source and target values
+	sf.source = source;
+	sf.target = target;
 
-	return serialize_feature(sst, sf, tippecanoe_layername);
+	std::memcpy(&sf.x_coord, &x_coord, sizeof(double));
+	std::memcpy(&sf.y_coord, &y_coord, sizeof(double));
+
+	int ret_val = serialize_feature(sst, sf, tippecanoe_layername);
+
+	sf.dropped = FEATURE_DROPPED;
+
+	//if (sf.t == VT_POINT) {
+		global_features.insert({sf.id, std::move(sf)});
+	//}
+
+	return ret_val;
 }
 
 void check_crs(json_object *j, const char *reading) {
@@ -240,17 +308,17 @@ struct json_serialize_action : json_feature_action {
 	serialization_state *sst;
 	int layer;
 	std::string layername;
-
-	int add_feature(json_object *geometry, bool geometrycollection, json_object *properties, json_object *id, json_object *tippecanoe, json_object *feature) {
+// DEREK: Edit parameters
+	int add_feature(json_object *geometry, bool geometrycollection, json_object *properties, json_object *id, json_object *tippecanoe, json_object *feature, json_object *priority) {
 		sst->line = geometry->parser->line;
 		if (geometrycollection) {
 			int ret = 1;
 			for (size_t g = 0; g < geometry->value.array.length; g++) {
-				ret &= serialize_geojson_feature(sst, geometry->value.array.array[g], properties, id, layer, tippecanoe, feature, layername);
+				ret &= serialize_geojson_feature(sst, geometry->value.array.array[g], properties, id, layer, tippecanoe, feature, layername, priority);
 			}
 			return ret;
 		} else {
-			return serialize_geojson_feature(sst, geometry, properties, id, layer, tippecanoe, feature, layername);
+			return serialize_geojson_feature(sst, geometry, properties, id, layer, tippecanoe, feature, layername, priority);
 		}
 	}
 

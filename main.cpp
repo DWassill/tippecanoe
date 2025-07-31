@@ -99,6 +99,11 @@ int retain_points_multiplier = 1;
 std::vector<std::string> unidecode_data;
 size_t maximum_string_attribute_length = 0;
 std::string accumulate_numeric;
+// DEREK: Add a variable to track if there are nodes with priority
+bool has_priorities = false;
+int max_priority = -1;
+// DEREK: Have a universal vector for the features
+std::map<unsigned long long, serial_feature> global_features;
 
 std::vector<order_field> order_by;
 bool order_reverse;
@@ -202,6 +207,9 @@ void init_cpus() {
 	// Round down to a power of 2
 	CPUS = 1 << (int) (log(CPUS) / log(2));
 
+	// DEREK: just to test smthn
+	CPUS = 1;
+
 	MAX_FILES = get_max_open_files();
 
 	// Don't really want too many temporary files, because the file system
@@ -296,7 +304,6 @@ struct drop_densest {
 
 int calc_feature_minzoom(struct index *ix, struct drop_state *ds, int maxzoom, double gamma) {
 	int feature_minzoom = 0;
-
 	if (gamma >= 0 && (ix->t == VT_POINT ||
 			   (additional[A_LINE_DROP] && ix->t == VT_LINE) ||
 			   (additional[A_POLYGON_DROP] && ix->t == VT_POLYGON))) {
@@ -744,7 +751,7 @@ void radix1(int *geomfds_in, int *indexfds_in, int inputs, int prefix, int split
 	// Arranged as bits to facilitate subdividing again if a subdivided file is still huge
 	int splitbits = log(splits) / log(2);
 	splits = 1 << splitbits;
-
+	
 	FILE *geomfiles[splits];
 	FILE *indexfiles[splits];
 	int geomfds[splits];
@@ -1214,6 +1221,11 @@ double round_droprate(double r) {
 	return std::round(r * 100000.0) / 100000.0;
 }
 
+// DEREK: Comparator for sorting by priority
+bool feature_comp(serial_feature a, serial_feature b) {
+	return a.priority > b.priority;
+}
+
 std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, int maxzoom, int minzoom, int basezoom, double basezoom_marker_width, sqlite3 *outdb, const char *outdir, std::set<std::string> *exclude, std::set<std::string> *include, int exclude_all, json_object *filter, double droprate, int buffer, const char *tmpdir, double gamma, int read_parallel, int forcetable, const char *attribution, bool uses_gamma, long long *file_bbox, long long *file_bbox1, long long *file_bbox2, const char *prefilter, const char *postfilter, const char *description, bool guess_maxzoom, bool guess_cluster_maxzoom, std::unordered_map<std::string, int> const *attribute_types, const char *pgm, std::unordered_map<std::string, attribute_op> const *attribute_accum, std::map<std::string, std::string> const &attribute_descriptions, std::string const &commandline, int minimum_maxzoom) {
 	int ret = EXIT_SUCCESS;
 
@@ -1450,7 +1462,7 @@ std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, i
 		size_t layer = a->second.id;
 
 		// geobuf
-		if (sources[source].format == "fgb" || (sources[source].file.size() > 4 && sources[source].file.substr(sources[source].file.size() - 4) == std::string(".fgb"))) {
+		if (sources[source].format == "fgb" || (sources[source].file.size() > 4 && sources[source].file.substr(sources[source].file.size() - 4) == std::string(".fgb"))) { // DEREK: Never true for this testing
 			struct stat st;
 			if (fstat(fd, &st) != 0) {
 				perror("fstat");
@@ -1523,7 +1535,7 @@ std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, i
 			continue;
 		}
 
-		if (sources[source].format == "geobuf" || (sources[source].file.size() > 7 && sources[source].file.substr(sources[source].file.size() - 7) == std::string(".geobuf"))) {
+		if (sources[source].format == "geobuf" || (sources[source].file.size() > 7 && sources[source].file.substr(sources[source].file.size() - 7) == std::string(".geobuf"))) { // DEREK: Never true for testing
 			struct stat st;
 			if (fstat(fd, &st) != 0) {
 				perror("fstat");
@@ -1596,7 +1608,7 @@ std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, i
 			continue;
 		}
 
-		if (sources[source].format == "csv" || (sources[source].file.size() > 4 && sources[source].file.substr(sources[source].file.size() - 4) == std::string(".csv"))) {
+		if (sources[source].format == "csv" || (sources[source].file.size() > 4 && sources[source].file.substr(sources[source].file.size() - 4) == std::string(".csv"))) { // DEREK: never true for testing
 			std::atomic<long long> layer_seq[CPUS];
 			double dist_sums[CPUS];
 			size_t dist_counts[CPUS];
@@ -2658,9 +2670,10 @@ std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, i
 	}
 
 	if (fix_dropping || drop_denser > 0) {
+		// DEREK: Edit how mizoom is calculated to use the priorities if possible
+
 		// Fix up the minzooms for features, now that we really know the base zoom
 		// and drop rate.
-
 		struct stat geomst;
 		if (fstat(geomfd, &geomst) != 0) {
 			perror("stat sorted geom\n");
@@ -2755,6 +2768,10 @@ std::pair<int, metadata> read_input(std::vector<source> &sources, char *fname, i
 	std::atomic<unsigned> midx(0);
 	std::atomic<unsigned> midy(0);
 	std::vector<strategy> strategies;
+
+	// DEREK: Sort the features by priority first
+	// std::sort(global_features.begin(), tures.end(), feature_comp);
+
 	int written = traverse_zooms(fd, size, stringpool, &midx, &midy, maxzoom, minzoom, outdb, outdir, buffer, fname, tmpdir, gamma, full_detail, low_detail, min_detail, pool_off, initial_x, initial_y, simplification, maxzoom_simplification, layermaps, prefilter, postfilter, attribute_accum, filter, strategies, iz, shared_nodes_map, nodepos, shared_nodes_bloom, basezoom, droprate, unidecode_data);
 
 	if (maxzoom != written) {
@@ -3087,6 +3104,9 @@ int main(int argc, char **argv) {
 		{"cluster-maxzoom", required_argument, 0, 'k'},
 		{"preserve-point-density-threshold", required_argument, 0, '~'},
 		{"preserve-multiplier-density-threshold", required_argument, 0, '~'},
+		// DEREK: add an argument for aggregating
+		{"aggregate-cluster", no_argument, &additional[A_AGGREGATE_CLUSTER], 1},
+		{"leave-lines", no_argument, &additional[A_LEAVE_LINES], 1},
 
 		{"Dropping or merging a fraction of features to keep under tile size limits", 0, 0, 0},
 		{"drop-densest-as-needed", no_argument, &additional[A_DROP_DENSEST_AS_NEEDED], 1},
@@ -3835,6 +3855,8 @@ int main(int argc, char **argv) {
 				    maxzoom, minzoom, basezoom, basezoom_marker_width, outdb, out_dir, &exclude, &include, exclude_all, filter, droprate, buffer, tmpdir, gamma, read_parallel, forcetable, attribution, gamma != 0, file_bbox, file_bbox1, file_bbox2, prefilter, postfilter, description, guess_maxzoom, guess_cluster_maxzoom, &attribute_types, argv[0], &attribute_accum, attribute_descriptions, commandline, minimum_maxzoom);
 
 	ret = std::get<0>(input_ret);
+
+	
 
 	if (outdb != NULL) {
 		mbtiles_close(outdb, argv[0]);

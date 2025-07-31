@@ -113,6 +113,16 @@ struct serial_feature {
 	bool has_id = false;
 	unsigned long long id = 0;
 
+	// DEREK: Adding a priority field in here. Higher number = higher priority.
+	unsigned int priority = 0;
+	//DEREK: add source and target fields for lines
+	unsigned long long source = -1;
+	unsigned long long target = -1;
+
+	// DEREK: track the coordinates for the nodes
+	double x_coord = 0;
+	double y_coord = 0;
+
 	int tippecanoe_minzoom = -1;
 	int tippecanoe_maxzoom = -1;
 
@@ -120,7 +130,7 @@ struct serial_feature {
 	unsigned long long index = 0;
 	unsigned long long gap = 0;  // filled in during z0. square of planar distance
 	unsigned long long label_point = 0;
-	long long extent = 0;
+	long long extent = 0; 
 
 	// These fields are not directly serialized, but are used
 	// to create the keys and values references into the string pool
@@ -151,6 +161,9 @@ struct serial_feature {
 	// >0: sequence number of additional feature kept by retain-points-multiplier
 	// INT_MAX: additional feature kept by preserve-multiplier-density-threshold
 	int dropped = FEATURE_DROPPED;	// was this feature dropped by rate?
+
+	// DEREK: Add a bool to know if the feature was already aggregated into another one
+	bool aggregated;
 
 	// unsigned long long drop_by;  // dot-dropping priority
 	bool reduced;	   // is polygon dust
