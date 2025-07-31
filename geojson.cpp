@@ -172,7 +172,7 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 					char *s = json_stringify(id);
 					fprintf(stderr, "Warning: Can't represent non-numeric feature ID %s\n", s);
 					free(s);  // stringify
-					//warned_nan = true;
+					warned_nan = true;
 				}
 			}
 		}

@@ -2804,6 +2804,18 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				layer.features.push_back(std::move(feature));
 				layer_features[x] = std::make_shared<serial_feature>();
 			}
+
+			if (layer.features.size() > 0) {
+				// DEREK: check that the features with priority > 0 are in a tile at each zoom level
+				if (z == 0) {
+				for (int i = 0; i < layer.features.size(); i++) {
+					if (layer.features[i].type == VT_POINT) {
+						//printf("%llu / %d/%lu/%lu              \n", layer.features[i].id, z, tx, ty);
+					}
+				}
+				}
+				tile.layers.push_back(std::move(layer));
+			}
 		}
 
 		if (postfilter != NULL) {
