@@ -1983,6 +1983,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 		bool done_first_pass = false;
 		std::vector<serial_feature> all_features;
 		std::map<unsigned long long, serial_feature> added_features;
+		std::vector<std::pair<unsigned long long, unsigned long long>> added_lines;
 
 		for (int i = max_priority + 1; i >= -1; i--) {
 		for (size_t seq = 0;; seq++) {
@@ -2148,7 +2149,17 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 						else if (sf.t == VT_LINE) {
 							unsigned long long src = this_zoom_features[sf.id].source;
 							unsigned long long trgt = this_zoom_features[sf.id].target;
+
 							if (src == trgt) {
+								continue;
+							}
+
+							std::pair<unsigned long long, unsigned long long> line = {src, trgt};
+							// DEREK: If we have already added a line from src to trgt, do not add another
+							if (std::find(added_lines.begin(), added_lines.end(), line) != added_lines.end()) {
+							}
+							line = {trgt, src};
+							if (std::find(added_lines.begin(), added_lines.end(), line) != added_lines.end()) {
 								continue;
 							}
 
@@ -2157,6 +2168,8 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 							
 							sf.geometry[1].x = this_zoom_features[trgt].geometry[0].x;
 							sf.geometry[1].y = this_zoom_features[trgt].geometry[0].y;
+
+							added_lines.push_back(line);
 						}
 						else {
 							continue;
