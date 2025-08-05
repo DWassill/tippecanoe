@@ -1985,13 +1985,13 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 		std::map<unsigned long long, serial_feature> added_features;
 		std::vector<std::pair<unsigned long long, unsigned long long>> added_lines;
 
-		for (int i = max_priority + 1; i >= -1; i--) {
+		//for (int i = max_priority + 1; i >= -1; i--) {
 		for (size_t seq = 0;; seq++) {
 			serial_feature sf;
 			ssize_t which_serial_feature = -1;
 
 
-			if (i == max_priority + 1) {
+			if (!done_first_pass) {
 				if (prefilter == NULL) {
 					sf = next_feature(geoms, geompos_in, z, tx, ty, initial_x, initial_y, &original_features, &unclipped_features, nextzoom, maxzoom, minzoom, max_zoom_increment, pass, along, alongminus, buffer, within, geomfile, geompos, start_geompos, &oprogress, todo, fname, child_shards, filter, global_stringpool, pool_off, layer_unmaps, first_time, compressed_input, &multiplier_state, tile_stringpool, unidecode_data, next_feature_state, arg->droprate);
 					sf.aggregated = false;
@@ -2000,7 +2000,9 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 				}
 
 				if (sf.t < 0) {
-					break;
+					done_first_pass = true;
+					seq = 0;
+					continue;
 				}
 				else {
 					all_features.push_back(sf);
@@ -2013,9 +2015,9 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 					break;
 				}
 				sf = all_features[seq];
-				if (sf.priority != i) {
-					continue;
-				}
+				// if (sf.priority != i) {
+				// 	continue;
+				// }
 				if (this_zoom_features[sf.id].dropped == FEATURE_DROPPED) {
 					continue;
 				}
@@ -2141,7 +2143,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 					// idea of density between zooms.
 
 					if (additional[A_AGGREGATE_CLUSTER]) {
-						if (sf.priority == i && sf.t == VT_POINT) {
+						if (sf.t == VT_POINT) {
 							if (sf.aggregated && sf.dropped == FEATURE_DROPPED) {
 								continue;
 							}
@@ -2180,17 +2182,13 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 					// DEREK: Again, make sure not to drop high priority
 					//if ((sf.index < merge_previndex || sf.index - merge_previndex < cluster_mingap) && find_feature_to_accumulate_onto(features, sf, which_serial_feature, layer_unmaps, LLONG_MAX)) {
 					if (!additional[A_AGGREGATE_CLUSTER]) {
-					if (sf.priority == i ) { // DEREK: try to add features for the current priority level
+						// DEREK: try to add features
 						if (this_zoom_features.count(sf.id) == 0) {
 							continue;
 						}
 						if (all_zooms_added_features.count(sf.id) == 0) {
 							continue;
 						}
-					}
-					else {
-						continue;
-					}
 					}
 				} else if (additional[A_DROP_DENSEST_AS_NEEDED]) {  // DEREK
 					add_sample_to(gaps, sf.gap, gaps_increment, seq);
@@ -2448,7 +2446,7 @@ long long write_tile(decompressor *geoms, std::atomic<long long> *geompos_in, ch
 			merge_previndex = sfindex;
 			coalesced_area = 0;
 		}
-		}
+		//}
 		// We are done reading the features.
 		// Close the prefilter if it was opened.
 		// Close the output files for the next zoom level.
