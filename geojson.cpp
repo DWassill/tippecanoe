@@ -172,7 +172,7 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 					char *s = json_stringify(id);
 					fprintf(stderr, "Warning: Can't represent non-numeric feature ID %s\n", s);
 					free(s);  // stringify
-					//warned_nan = true;
+					warned_nan = true;
 				}
 			}
 		}
@@ -253,8 +253,8 @@ int serialize_geojson_feature(struct serialization_state *sst, json_object *geom
 	sf.source = source;
 	sf.target = target;
 
-	std::memcpy(&sf.x_coord, &x_coord, sizeof(double));
-	std::memcpy(&sf.y_coord, &y_coord, sizeof(double));
+	memcpy(&sf.x_coord, &x_coord, sizeof(double));
+	memcpy(&sf.y_coord, &y_coord, sizeof(double));
 
 	int ret_val = serialize_feature(sst, sf, tippecanoe_layername);
 
